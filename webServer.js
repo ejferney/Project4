@@ -281,7 +281,7 @@ app.get("/photosOfUser/:id", async (request, response) => {
     const [userExists, photos] = await Promise.all([
       User.exists({ _id: id }),
       Photo.find({ user_id: id })
-        .select("_id user_id file_name date_time comments")
+        .select("_id user_id file_name date_time comments tags")
         .lean(),
     ]);
 
@@ -296,35 +296,51 @@ app.get("/photosOfUser/:id", async (request, response) => {
       return;
     }
 
-    // Collect all distinct commenter user_ids from all photos.
-    const commenterIds = new Set();
+    // Collect all distinct commenter and tagger user_ids from all photos.
+    const userIdsToFetch = new Set();
     photos.forEach((photo) => {
       (photo.comments || []).forEach((c) => {
-        if (c.user_id) commenterIds.add(c.user_id.toString());
+        if (c.user_id) userIdsToFetch.add(c.user_id.toString());
+      });
+      (photo.tags || []).forEach((t) => {
+        if (t.user_id) userIdsToFetch.add(t.user_id.toString());
       });
     });
 
-    // Fetch minimal user info for all commenters in one query.
-    const commenters = await User.find({
-      _id: { $in: Array.from(commenterIds) },
+    // Fetch minimal user info for all commenters/taggers in one query.
+    const usersInfo = await User.find({
+      _id: { $in: Array.from(userIdsToFetch) },
     })
       .select("_id first_name last_name")
       .lean();
 
-    const commenterMap = {};
-    commenters.forEach((u) => {
-      commenterMap[u._id.toString()] = u;
+    const userMap = {};
+    usersInfo.forEach((u) => {
+      userMap[u._id.toString()] = u;
     });
 
     // Shape the response photos according to the API spec.
+    // Shape the response photos according to the API spec.
     const responsePhotos = photos.map((p) => {
       const formattedComments = (p.comments || []).map((c) => {
-        const userObj = commenterMap[c.user_id?.toString()] || null;
+        const userObj = userMap[c.user_id?.toString()] || null;
         return {
           _id: c._id,
           comment: c.comment,
           date_time: c.date_time,
           user: userObj,
+        };
+      });
+
+      const formattedTags = (p.tags || []).map((t) => {
+        const userObj = userMap[t.user_id?.toString()] || null;
+        return {
+          _id: t._id,
+          x: t.x,
+          y: t.y,
+          width: t.width,
+          height: t.height,
+          user: userObj, // Embedded user object for display
         };
       });
 
@@ -334,6 +350,7 @@ app.get("/photosOfUser/:id", async (request, response) => {
         file_name: p.file_name,
         date_time: p.date_time,
         comments: formattedComments,
+        tags: formattedTags,
       };
     });
 
@@ -434,6 +451,99 @@ app.post("/commentsOfPhoto/:photo_id", async (request, response) => {
   } catch (err) {
     console.error(`/commentsOfPhoto/${photo_id} error:`, err);
     response.status(500).send({ error: "Server error adding comment" });
+  }
+});
+
+/**
+ * URL /photos/:photo_id/tags - Add a tag to the photo.
+ */
+app.post("/photos/:photo_id/tags", async (request, response) => {
+  const { photo_id } = request.params;
+  const { user_id, x, y, width, height } = request.body;
+  // const loggedInUser = request.session.user_id; // Tagging done by logged in user, but tag is FOR 'user_id'
+
+  if (!request.session.user_id) {
+    response.status(401).send({ error: "Unauthorized" });
+    return;
+  }
+
+  if (!mongoose.Types.ObjectId.isValid(photo_id)) {
+    response.status(400).send({ error: "Invalid photo id" });
+    return;
+  }
+  if (!mongoose.Types.ObjectId.isValid(user_id)) {
+    response.status(400).send({ error: "Invalid user id to tag" });
+    return;
+  }
+  if (x === undefined || y === undefined || width === undefined || height === undefined) {
+    response.status(400).send({ error: "Missing tag coordinates" });
+    return;
+  }
+
+  try {
+    const photo = await Photo.findById(photo_id);
+    if (!photo) {
+      response.status(400).send({ error: "Photo not found" });
+      return;
+    }
+
+    // Verify user to be tagged exists
+    const userToTag = await User.findById(user_id);
+    if (!userToTag) {
+      response.status(400).send({ error: "User to tag not found" });
+      return;
+    }
+
+    const newTag = {
+      user_id: user_id,
+      x,
+      y,
+      width,
+      height,
+      date_time: new Date(),
+    };
+
+    photo.tags.push(newTag);
+    await photo.save();
+
+    response.status(200).send({});
+  } catch (err) {
+    console.error(`/photos/${photo_id}/tags error:`, err);
+    response.status(500).send({ error: "Server error adding tag" });
+  }
+});
+
+/**
+ * URL /photos/:photo_id/tags/:tag_id - Delete a tag from the photo.
+ */
+app.delete("/photos/:photo_id/tags/:tag_id", async (request, response) => {
+  const { photo_id, tag_id } = request.params;
+
+  if (!request.session.user_id) {
+    response.status(401).send({ error: "Unauthorized" });
+    return;
+  }
+
+  try {
+    const photo = await Photo.findById(photo_id);
+    if (!photo) {
+      response.status(400).send({ error: "Photo not found" });
+      return;
+    }
+
+    const initialLength = photo.tags.length;
+    photo.tags = photo.tags.filter(tag => tag._id.toString() !== tag_id);
+
+    if (photo.tags.length === initialLength) {
+      response.status(400).send({ error: "Tag not found" });
+      return;
+    }
+
+    await photo.save();
+    response.status(200).send({});
+  } catch (err) {
+    console.error(`/photos/${photo_id}/tags/${tag_id} error:`, err);
+    response.status(500).send({ error: "Server error deleting tag" });
   }
 });
 

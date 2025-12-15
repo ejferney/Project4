@@ -15,6 +15,24 @@ const commentSchema = new mongoose.Schema({
 });
 
 /**
+ * Define the Mongoose Schema for a Tag.
+ */
+const tagSchema = new mongoose.Schema({
+  // The ID of the user being tagged.
+  user_id: mongoose.Schema.Types.ObjectId,
+  // x coordinate (as percentage of image width)
+  x: Number,
+  // y coordinate (as percentage of image height)
+  y: Number,
+  // width of the tag box (as percentage of image width)
+  width: Number,
+  // height of the tag box (as percentage of image height)
+  height: Number,
+  // The date and time when the tag was created.
+  date_time: { type: Date, default: Date.now },
+});
+
+/**
  * Define the Mongoose Schema for a Photo.
  */
 const photoSchema = new mongoose.Schema({
@@ -26,6 +44,8 @@ const photoSchema = new mongoose.Schema({
   user_id: mongoose.Schema.Types.ObjectId,
   // Array of comment objects representing the comments made on this photo.
   comments: [commentSchema],
+  // Array of tags on this photo.
+  tags: [tagSchema],
 });
 
 /**
