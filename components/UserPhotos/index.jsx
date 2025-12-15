@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 // eslint-disable-next-line import/no-extraneous-dependencies
 import {
   Card,
@@ -9,10 +9,16 @@ import {
   Button,
   TextField,
   MobileStepper,
+  IconButton,
 } from "@mui/material";
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Link, useNavigate } from "react-router-dom";
-import { fetchPhotosOfUser, addComment } from '../../lib/api';
+import DeleteIcon from '@mui/icons-material/Delete';
+import FavoriteIcon from '@mui/icons-material/Favorite';
+import FavoriteBorderIcon from '@mui/icons-material/FavoriteBorder';
+import { io } from "socket.io-client";
+
+import { fetchPhotosOfUser, addComment, deleteComment, deletePhoto, likePhoto } from '../../lib/api';
 import useStore from '../../lib/store';
 
 import './styles.css';
@@ -20,6 +26,7 @@ import './styles.css';
 function UserPhotos({ userId, photoIndexParam }) {
   const navigate = useNavigate();
   const advancedEnabled = useStore((state) => state.advancedEnabled);
+  const loggedInUser = useStore((state) => state.loggedInUser);
   const queryClient = useQueryClient();
   const [newComments, setNewComments] = useState({});
 
@@ -29,13 +36,78 @@ function UserPhotos({ userId, photoIndexParam }) {
     enabled: !!userId,
   });
 
+  // Socket.io Connection
+  useEffect(() => {
+    const socket = io("http://localhost:3001");
+
+    socket.on("like_update", ({ photo_id, likes }) => {
+      // Optimistically update the cache for all users viewing this photo
+      queryClient.setQueryData(['photos', userId], (oldData) => {
+        if (!oldData) return oldData;
+        return oldData.map(p => {
+          if (p._id === photo_id) {
+            return { ...p, likes: likes };
+          }
+          return p;
+        });
+      });
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, [userId, queryClient]);
+
+
   const addCommentMutation = useMutation({
     mutationFn: ({ photoId, comment }) => addComment(photoId, comment),
     onSuccess: () => {
       queryClient.invalidateQueries(['photos', userId]);
-      queryClient.invalidateQueries(['comments', userId]); // Also invalidate user comments list
+      queryClient.invalidateQueries(['comments', userId]);
     },
   });
+
+  const deleteCommentMutation = useMutation({
+    mutationFn: ({ photoId, commentId }) => deleteComment(photoId, commentId),
+    onSuccess: () => {
+      queryClient.invalidateQueries(['photos', userId]);
+      queryClient.invalidateQueries(['comments', userId]);
+    },
+  });
+
+  const deletePhotoMutation = useMutation({
+    mutationFn: ({ photoId }) => deletePhoto(photoId),
+    onSuccess: () => {
+      queryClient.invalidateQueries(['photos', userId]);
+    },
+  });
+
+  const likeMutation = useMutation({
+    mutationFn: (photoId) => likePhoto(photoId),
+    // onSuccess is handled by socket event usually, but we can also invalidate to be safe
+    // or just let the socket event do the UI update.
+    onError: (err) => {
+      console.error("Like failed", err);
+    }
+  });
+
+  const handleDeleteComment = (photoId, commentId) => {
+    // eslint-disable-next-line no-alert
+    if (window.confirm("Are you sure you want to delete this comment?")) {
+      deleteCommentMutation.mutate({ photoId, commentId });
+    }
+  };
+
+  const handleDeletePhoto = (photoId) => {
+    // eslint-disable-next-line no-alert
+    if (window.confirm("Are you sure you want to delete this photo?")) {
+      deletePhotoMutation.mutate({ photoId });
+    }
+  };
+
+  const handleLike = (photoId) => {
+    likeMutation.mutate(photoId);
+  };
 
   const handleCommentChange = (photoId, value) => {
     setNewComments((prev) => ({ ...prev, [photoId]: value }));
@@ -54,6 +126,10 @@ function UserPhotos({ userId, photoIndexParam }) {
         // Optionally show an error message to the user
       }
     });
+  };
+
+  const isLiked = (photo) => {
+    return (photo.likes || []).includes(loggedInUser?._id);
   };
 
   if (isPending) {
@@ -109,6 +185,13 @@ function UserPhotos({ userId, photoIndexParam }) {
           <CardHeader
             title={photo.file_name}
             subheader={photo.date_time}
+            action={
+              loggedInUser && loggedInUser._id === photo.user_id && (
+                <IconButton onClick={() => handleDeletePhoto(photo._id)}>
+                  <DeleteIcon />
+                </IconButton>
+              )
+            }
           />
           <CardMedia
             component="img"
@@ -116,6 +199,15 @@ function UserPhotos({ userId, photoIndexParam }) {
             alt={photo.file_name}
           />
           <CardContent>
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: '10px' }}>
+              <IconButton onClick={() => handleLike(photo._id)} disabled={!loggedInUser}>
+                {isLiked(photo) ? <FavoriteIcon color="error" /> : <FavoriteBorderIcon />}
+              </IconButton>
+              <Typography variant="body2" color="textSecondary">
+                {photo.likes?.length || 0} Likes
+              </Typography>
+            </div>
+
             <Typography variant="subtitle1">Comments:</Typography>
             {photo.comments && photo.comments.map((c) => (
               <div key={c._id} style={{ marginBottom: "8px" }}>
@@ -125,6 +217,11 @@ function UserPhotos({ userId, photoIndexParam }) {
                 <Typography variant="caption" color="textSecondary" sx={{ ml: 1 }}>
                   {c.date_time}
                 </Typography>
+                {loggedInUser && c.user && loggedInUser._id === c.user._id && (
+                  <IconButton size="small" onClick={() => handleDeleteComment(photo._id, c._id)}>
+                    <DeleteIcon fontSize="small" />
+                  </IconButton>
+                )}
                 <Typography variant="body1">{c.comment}</Typography>
               </div>
             ))}
@@ -183,6 +280,13 @@ function UserPhotos({ userId, photoIndexParam }) {
           <CardHeader
             title={photo.file_name}
             subheader={photo.date_time}
+            action={
+              loggedInUser && loggedInUser._id === photo.user_id && (
+                <IconButton onClick={() => handleDeletePhoto(photo._id)}>
+                  <DeleteIcon />
+                </IconButton>
+              )
+            }
           />
           <CardMedia
             component="img"
@@ -190,6 +294,15 @@ function UserPhotos({ userId, photoIndexParam }) {
             alt={photo.file_name}
           />
           <CardContent>
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: '10px' }}>
+              <IconButton onClick={() => handleLike(photo._id)} disabled={!loggedInUser}>
+                {isLiked(photo) ? <FavoriteIcon color="error" /> : <FavoriteBorderIcon />}
+              </IconButton>
+              <Typography variant="body2" color="textSecondary">
+                {photo.likes?.length || 0} Likes
+              </Typography>
+            </div>
+
             <Typography variant="subtitle1">Comments:</Typography>
             {photo.comments && photo.comments.map((c) => (
               <div key={c._id} style={{ marginBottom: "8px" }}>
@@ -199,6 +312,11 @@ function UserPhotos({ userId, photoIndexParam }) {
                 <Typography variant="caption" color="textSecondary" sx={{ ml: 1 }}>
                   {c.date_time}
                 </Typography>
+                {loggedInUser && c.user && loggedInUser._id === c.user._id && (
+                  <IconButton size="small" onClick={() => handleDeleteComment(photo._id, c._id)}>
+                    <DeleteIcon fontSize="small" />
+                  </IconButton>
+                )}
                 <Typography variant="body1">{c.comment}</Typography>
               </div>
             ))}

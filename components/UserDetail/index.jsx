@@ -1,19 +1,44 @@
 import React from 'react';
 // eslint-disable-next-line import/no-extraneous-dependencies
 import PropTypes from 'prop-types';
-import { useQuery } from '@tanstack/react-query';
-import { Typography } from '@mui/material';
-import { Link } from 'react-router-dom';
-import { fetchUser } from '../../lib/api';
+import { useQuery, useMutation } from '@tanstack/react-query';
+import { Typography, Button } from '@mui/material';
+import { Link, useNavigate } from 'react-router-dom';
+import { fetchUser, deleteUser } from '../../lib/api';
+import useStore from '../../lib/store';
 
 import './styles.css';
 
 function UserDetail({ userId }) {
+  const navigate = useNavigate();
+  const loggedInUser = useStore((state) => state.loggedInUser);
+  const logout = useStore((state) => state.logout);
+
   const { data: user, isPending, isError } = useQuery({
     queryKey: ['user', userId],
     queryFn: () => fetchUser(userId),
     enabled: !!userId,
   });
+
+  const deleteUserMutation = useMutation({
+    mutationFn: (id) => deleteUser(id),
+    onSuccess: () => {
+      logout();
+      navigate('/login-register');
+    },
+    onError: (err) => {
+      console.error("Failed to delete user", err);
+      // eslint-disable-next-line no-alert
+      alert("Failed to delete account");
+    }
+  });
+
+  const handleDeleteAccount = () => {
+    // eslint-disable-next-line no-alert
+    if (window.confirm("Are you sure you want to delete your account? This action cannot be undone.")) {
+      deleteUserMutation.mutate(userId);
+    }
+  };
 
   if (isPending) {
     return <Typography variant="body1">Loading user details...</Typography>;
@@ -48,6 +73,17 @@ function UserDetail({ userId }) {
       <Typography variant="body1">
         <Link to={`/photos/${user._id}`}>View Photos</Link>
       </Typography>
+
+      {loggedInUser && loggedInUser._id === userId && (
+        <Button
+          variant="contained"
+          color="error"
+          onClick={handleDeleteAccount}
+          sx={{ mt: 4 }}
+        >
+          Delete Account
+        </Button>
+      )}
     </div>
   );
 }

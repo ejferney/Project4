@@ -15,6 +15,8 @@ import multer from "multer";
 import fs from "fs";
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import http from "http";
+import { Server } from "socket.io";
 
 // ToDO - Your submission should work without this line. Comment out or delete this line for tests and before submission!
 //import models from "./modelData/photoApp.js";
@@ -27,6 +29,22 @@ import SchemaInfo from "./schema/schemaInfo.js";
 
 const portno = 3001; // Port number to use
 const app = express();
+
+// Create HTTP server and Socket.io server
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: "http://localhost:3000",
+    credentials: true,
+  }
+});
+
+io.on("connection", (socket) => {
+  console.log("A user connected", socket.id);
+  socket.on("disconnect", () => {
+    console.log("User disconnected", socket.id);
+  });
+});
 
 // Enable CORS for all routes
 // Enable CORS for all routes
@@ -281,7 +299,7 @@ app.get("/photosOfUser/:id", async (request, response) => {
     const [userExists, photos] = await Promise.all([
       User.exists({ _id: id }),
       Photo.find({ user_id: id })
-        .select("_id user_id file_name date_time comments")
+        .select("_id user_id file_name date_time comments likes")
         .lean(),
     ]);
 
@@ -301,6 +319,10 @@ app.get("/photosOfUser/:id", async (request, response) => {
     photos.forEach((photo) => {
       (photo.comments || []).forEach((c) => {
         if (c.user_id) commenterIds.add(c.user_id.toString());
+      });
+      // Also collect LIKERS
+      (photo.likes || []).forEach((userId) => {
+        commenterIds.add(userId.toString());
       });
     });
 
@@ -334,6 +356,7 @@ app.get("/photosOfUser/:id", async (request, response) => {
         file_name: p.file_name,
         date_time: p.date_time,
         comments: formattedComments,
+        likes: (p.likes || []).map(userId => userId), // Send back the array of IDs (or map to user objects if requested, but IDs are sufficient for counting/checking self)
       };
     });
 
@@ -438,6 +461,56 @@ app.post("/commentsOfPhoto/:photo_id", async (request, response) => {
 });
 
 
+/**
+ * URL /commentsOfPhoto/:photo_id/:comment_id - Delete a comment
+ */
+app.delete("/commentsOfPhoto/:photo_id/:comment_id", async (request, response) => {
+  const { photo_id, comment_id } = request.params;
+  const { user_id } = request.session;
+
+  if (!user_id) {
+    response.status(401).send({ error: "Unauthorized" });
+    return;
+  }
+
+  if (!mongoose.Types.ObjectId.isValid(photo_id) || !mongoose.Types.ObjectId.isValid(comment_id)) {
+    response.status(400).send({ error: "Invalid IDs" });
+    return;
+  }
+
+  try {
+    console.log(`Deleting comment. Photo: ${photo_id}, Comment: ${comment_id}, User: ${user_id}`);
+    const photo = await Photo.findById(photo_id);
+    if (!photo) {
+      console.log("Photo not found");
+      response.status(404).send({ error: "Photo not found" });
+      return;
+    }
+
+    // Debug comments
+    console.log("Available comments:", photo.comments.map(c => c._id.toString()));
+
+    const commentIndex = photo.comments.findIndex(c => c._id.toString() === comment_id);
+    if (commentIndex === -1) {
+      response.status(404).send({ error: "Comment not found" });
+      return;
+    }
+
+    if (photo.comments[commentIndex].user_id.toString() !== user_id) {
+      response.status(403).send({ error: "You can only delete your own comments" });
+      return;
+    }
+
+    photo.comments.splice(commentIndex, 1);
+    await photo.save();
+
+    response.status(200).send({});
+  } catch (err) {
+    console.error(`/commentsOfPhoto/${photo_id}/${comment_id} error:`, err);
+    response.status(500).send({ error: "Server error deleting comment" });
+  }
+});
+
 
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
@@ -487,7 +560,161 @@ app.post("/photos/new", upload.single("uploadedphoto"), async (request, response
   }
 });
 
-const server = app.listen(portno, function () {
+/**
+ * URL /photos/:id - Delete a photo
+ */
+app.delete("/photos/:id", async (request, response) => {
+  const { id } = request.params;
+  const { user_id } = request.session;
+
+  if (!user_id) {
+    response.status(401).send({ error: "Unauthorized" });
+    return;
+  }
+
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    response.status(400).send({ error: "Invalid photo ID" });
+    return;
+  }
+
+  try {
+    const photo = await Photo.findById(id);
+    if (!photo) {
+      response.status(404).send({ error: "Photo not found" });
+      return;
+    }
+
+    if (photo.user_id.toString() !== user_id) {
+      response.status(403).send({ error: "You can only delete your own photos" });
+      return;
+    }
+
+    // Delete the file from the filesystem (async logic, but sync is safer here for simplicity)
+    const filePath = `images/${photo.file_name}`;
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+    }
+
+    // Delete the photo object
+    await Photo.findByIdAndDelete(id);
+
+    response.status(200).send({});
+  } catch (err) {
+    console.error(`/photos/${id} delete error:`, err);
+    response.status(500).send({ error: "Server error deleting photo" });
+  }
+});
+
+/**
+ * URL /user/:id - Delete a user account
+ */
+app.delete("/user/:id", async (request, response) => {
+  const { id } = request.params;
+  const { user_id } = request.session;
+
+  if (!user_id) {
+    response.status(401).send({ error: "Unauthorized" });
+    return;
+  }
+
+  if (id !== user_id) {
+    response.status(403).send({ error: "You can only delete your own account" });
+    return;
+  }
+
+  try {
+    // 1. Delete all photos uploaded by the user
+    // Find photos first to delete files
+    const userPhotos = await Photo.find({ user_id: id });
+    for (const photo of userPhotos) {
+      const filePath = `images/${photo.file_name}`;
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    }
+    // Delete photo documents
+    await Photo.deleteMany({ user_id: id });
+
+    // 2. Remove all comments made by the user on MULTIPLE photos
+    // We need to update *other* photos (or all photos, but we just deleted user's photos)
+    // Actually, simple way: Update all photos to pull comments where user_id matches.
+    await Photo.updateMany(
+      {},
+      { $pull: { comments: { user_id: id } } }
+    );
+
+    // 3. Delete the user document
+    await User.findByIdAndDelete(id);
+
+    // 4. Destroy session
+    request.session.destroy((err) => {
+      if (err) {
+        console.error("Session destroy error", err);
+        // Continue anyway
+      }
+      response.status(200).send({});
+    });
+
+  } catch (err) {
+    console.error(`/user/${id} delete error:`, err);
+    response.status(500).send({ error: "Server error deleting user" });
+  }
+});
+
+/**
+ * URL /photos/:id/like - Like or Unlike a photo
+ */
+app.post("/photos/:id/like", async (request, response) => {
+  const { id } = request.params;
+  const { user_id } = request.session;
+
+  if (!user_id) {
+    response.status(401).send({ error: "Unauthorized" });
+    return;
+  }
+
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    response.status(400).send({ error: "Invalid photo ID" });
+    return;
+  }
+
+  try {
+    const photo = await Photo.findById(id);
+    if (!photo) {
+      response.status(404).send({ error: "Photo not found" });
+      return;
+    }
+
+    // Toggle like
+    const userIdStr = user_id.toString();
+    const likeIndex = (photo.likes || []).findIndex(id => id.toString() === userIdStr);
+
+    if (likeIndex === -1) {
+      // Like
+      if (!photo.likes) photo.likes = [];
+      photo.likes.push(user_id);
+    } else {
+      // Unlike
+      photo.likes.splice(likeIndex, 1);
+    }
+
+    await photo.save();
+
+    // Broadcast update via Socket.io
+    io.emit("like_update", {
+      photo_id: id,
+      likes: photo.likes
+    });
+
+    response.status(200).send({ likes: photo.likes });
+  } catch (err) {
+    console.error(`/photos/${id}/like error:`, err);
+    response.status(500).send({ error: "Server error updating likes" });
+  }
+});
+
+// Replaced app.listen with server.listen
+server.listen(portno, function () {
   const port = server.address().port;
   console.log(
     "Listening at http://localhost:" +
@@ -495,4 +722,5 @@ const server = app.listen(portno, function () {
     " exporting the directory " +
     __dirname
   );
+  console.log("Server updated with Story 6 Like features & Sockets.");
 });
